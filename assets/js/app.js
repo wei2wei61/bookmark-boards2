@@ -262,6 +262,26 @@
             return null;
         }
 
+        function playYouTube(postId, youtubeId) {
+            const media = document.getElementById(`youtube-media-${postId}`);
+            if (!media || media.querySelector('iframe')) return;
+
+            const card = media.closest('.bookmark-card');
+            if (card) card.classList.add('is-active');
+
+            const thumbnail = media.querySelector('.youtube-thumb-wrap');
+            if (!thumbnail) return;
+
+            thumbnail.outerHTML = `
+                <iframe
+                    class="youtube-embed"
+                    src="https://www.youtube.com/embed/${encodeURIComponent(youtubeId)}?autoplay=1&rel=0"
+                    title="YouTube video player"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    allowfullscreen
+                ></iframe>`;
+        }
+
         async function addPost() {
             const input = document.getElementById('urlInput'); const url = input.value.trim();
             if (!url) return;
@@ -413,19 +433,22 @@
             } else if (p.type === 'youtube') {
                 // ── YouTubeカード ──
                 card.innerHTML = `
-                    <div class="relative w-full youtube-wrapper overflow-hidden">
-                        <div class="drop-shield"></div>
+                    <div id="youtube-media-${postIdHtml}" class="relative w-full youtube-wrapper overflow-hidden">
+                        <div class="drop-shield" onclick="playYouTube(${postIdArg}, '${youtubeIdHtml}')"></div>
                         <div class="absolute top-3 right-3 z-50 opacity-0 group-hover:opacity-100 transition-all scale-90 group-hover:scale-100">
                             <button onclick="removePost(${postIdArg})" class="card-delete-btn flex items-center justify-center" aria-label="カードを削除">${ICONS.trash}</button>
                         </div>
-                        <a class="youtube-thumb-wrap block" href="https://www.youtube.com/watch?v=${youtubeIdHtml}" target="_blank" rel="noopener noreferrer" aria-label="YouTubeで動画を見る">
+                        <button type="button" class="youtube-thumb-wrap block" onclick="playYouTube(${postIdArg}, '${youtubeIdHtml}')" aria-label="埋め込みでYouTubeを再生">
                             <img
                                 src="https://i.ytimg.com/vi/${youtubeIdHtml}/hqdefault.jpg"
                                 alt="YouTube thumbnail"
                                 onerror="this.src='https://i.ytimg.com/vi/${youtubeIdHtml}/mqdefault.jpg'"
                             >
+                            <span class="youtube-play-badge" aria-hidden="true">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-7 w-7" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                            </span>
 
-                        </a>
+                        </button>
                     </div>
                     <div class="card-info-panel"><div class="card-info-inner"><div class="flex flex-col gap-4">
                         <div class="flex justify-between items-center px-1">
@@ -575,6 +598,7 @@
         });
 
         window.toggleSidebar = toggleSidebar; window.toggleSearch = toggleSearch; window.toggleFilter = toggleFilter; window.openNewBoardModal = openNewBoardModal; window.openNewFolderModal = openNewFolderModal; window.closeModal = closeModal; window.confirmCreateBoard = confirmCreateBoard; window.confirmCreateFolder = confirmCreateFolder; window.deleteBoard = deleteBoard; window.deleteFolder = deleteFolder; window.addPost = addPost; window.removePost = removePost; window.updatePostField = updatePostField; window.handleSearch = handleSearch; window.selectTagFilter = selectTagFilter; window.handleSearchMouseLeave = handleSearchMouseLeave; window.addTag = addTag; window.removeTag = removeTag; window.openHelpModal = openHelpModal; window.openRenameModal = openRenameModal; window.selectBoard = selectBoard; window.toggleFolder = toggleFolder; window.openExportBoardModal = openExportBoardModal; window.confirmExportBoard = confirmExportBoard; window.addNoteCard = addNoteCard; window.autoResizeTextarea = autoResizeTextarea; window.clearTagFilters = clearTagFilters;
+        window.playYouTube = playYouTube;
 
         document.getElementById('urlInput').addEventListener('keypress', (e) => e.key === 'Enter' && addPost());
         document.getElementById('newBoardName').addEventListener('keypress', (e) => e.key === 'Enter' && confirmCreateBoard());

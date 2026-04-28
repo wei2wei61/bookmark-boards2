@@ -615,6 +615,9 @@
             padding-bottom: 56.25%; /* 16:9 */
             overflow: hidden;
             cursor: pointer;
+            border: 0;
+            background: #000;
+            display: block;
         }
         .youtube-thumb-wrap img {
             position: absolute;
@@ -626,6 +629,35 @@
         }
         .youtube-thumb-wrap:hover img {
             transform: scale(1.03);
+        }
+
+        .youtube-play-badge {
+            position: absolute;
+            inset: 50% auto auto 50%;
+            transform: translate(-50%, -50%);
+            width: 58px;
+            height: 58px;
+            border-radius: 9999px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            background: rgba(239, 68, 68, 0.92);
+            box-shadow: 0 12px 28px rgba(0,0,0,0.45);
+            transition: transform 0.2s ease, background 0.2s ease;
+            pointer-events: none;
+        }
+        .youtube-thumb-wrap:hover .youtube-play-badge,
+        .youtube-thumb-wrap:focus-visible .youtube-play-badge {
+            transform: translate(-50%, -50%) scale(1.08);
+            background: rgba(220, 38, 38, 0.98);
+        }
+        .youtube-embed {
+            display: block;
+            width: 100%;
+            aspect-ratio: 16 / 9;
+            border: 0;
+            background: #000;
         }
 
         .add-note-btn {
