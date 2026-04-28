@@ -1,0 +1,1491 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BookMark Boards</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script async src="https://platform.twitter.com/widgets.js" charset="utf-8"></script>
+    
+    <!-- Firebase Libraries -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, onAuthStateChanged, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const isCloudEnv = typeof __firebase_config !== 'undefined';
+        
+        window.appState = {
+            user: null,
+            isCloud: isCloudEnv,
+            searchQuery: "",
+            selectedTags: [],  // 複数タグフィルター
+            selectedPostIds: [],
+            isSearchExpanded: false,
+            isFilterExpanded: false, 
+            isEditing: false, 
+            draggedPostId: null,
+            draggedBoardId: null,
+            pendingAction: null, // 確認モーダル用の保留アクション
+            exportingBoardId: null, // 書き出し用
+            appData: {
+                activeBoardId: null,
+                boards: [],
+                folders: []
+            }
+        };
+
+        window.saveData = async (newData, silent = false) => {
+            window.appState.appData = newData;
+            if (window.appState.isCloud && window.appState.user) {
+                const uid = window.appState.user.uid;
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const db = getFirestore();
+                const docRef = doc(db, 'artifacts', appId, 'users', uid, 'settings', 'appData');
+                try { await setDoc(docRef, newData); } catch (e) { console.error("Save failed", e); }
+            } else {
+                localStorage.setItem('x_board_local_data_v4', JSON.stringify(newData));
+            }
+            
+            if (!silent) {
+                renderSidebar();
+                renderActiveBoard();
+            }
+        };
+
+        const initApp = async () => {
+            if (isCloudEnv) {
+                const firebaseConfig = JSON.parse(__firebase_config);
+                const app = initializeApp(firebaseConfig);
+                const auth = getAuth(app);
+                const db = getFirestore(app);
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+                try {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else { await signInAnonymously(auth); }
+                } catch (e) { console.error(e); }
+
+                onAuthStateChanged(auth, (user) => {
+                    window.appState.user = user;
+                    if (user) {
+                        const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'appData');
+                        onSnapshot(docRef, (docSnap) => {
+                            if (docSnap.exists()) {
+                                const data = docSnap.data();
+                                if (!data.folders) data.folders = [];
+                                window.appState.appData = data;
+                                if (!window.appState.isEditing) {
+                                    renderSidebar();
+                                    renderActiveBoard();
+                                }
+                            } else {
+                                const defaultId = Date.now().toString();
+                                window.saveData({
+                                    activeBoardId: defaultId,
+                                    boards: [{ id: defaultId, name: 'デフォルト', posts: [], folderId: null }],
+                                    folders: []
+                                });
+                            }
+                        });
+                    }
+                });
+            } else {
+                const saved = localStorage.getItem('x_board_local_data_v4');
+                if (saved) {
+                    const data = JSON.parse(saved);
+                    if (!data.folders) data.folders = [];
+                    window.appState.appData = data;
+                } else {
+                    const defaultId = Date.now().toString();
+                    window.appState.appData = {
+                        activeBoardId: defaultId,
+                        boards: [{ id: defaultId, name: 'デフォルト', posts: [], folderId: null }],
+                        folders: []
+                    };
+                }
+                renderSidebar();
+                renderActiveBoard();
+            }
+        };
+
+        window.addEventListener('DOMContentLoaded', initApp);
+    </script>
+
+    <style>
+        :root {
+            --bg-base: #0a0b0f;
+            --bg-surface: #0f1117;
+            --bg-elevated: #151820;
+            --bg-hover: #1a1e29;
+            --border-subtle: rgba(255,255,255,0.05);
+            --border-default: rgba(255,255,255,0.08);
+            --border-strong: rgba(255,255,255,0.12);
+            --accent: #7c6fff;
+            --accent-dim: rgba(124, 111, 255, 0.12);
+            --accent-glow: rgba(124, 111, 255, 0.25);
+            --text-primary: #eef0f6;
+            --text-secondary: #8890a4;
+            --text-muted: #4a5168;
+        }
+
+        * { box-sizing: border-box; }
+
+        html { scrollbar-gutter: stable; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
+        #main-scroll { -ms-overflow-style: none; scrollbar-width: none; }
+        #main-scroll::-webkit-scrollbar { display: none; }
+
+        body {
+            font-family: 'DM Sans', sans-serif;
+            background: var(--bg-base);
+            color: var(--text-primary);
+            background-image: 
+                radial-gradient(ellipse 80% 50% at 50% -20%, rgba(124, 111, 255, 0.06) 0%, transparent 70%);
+        }
+
+        /* ── Sidebar ── */
+        #sidebar { 
+            transition: transform 0.3s ease-in-out, opacity 0.3s ease-in-out, margin-right 0.3s ease-in-out;
+            width: 260px;
+            min-width: 260px;
+            overflow: hidden; 
+            background: var(--bg-surface);
+            border-right: 1px solid var(--border-subtle);
+            will-change: transform;
+        }
+        #sidebar.closed { 
+            transform: translateX(-260px);
+            opacity: 0;
+            margin-right: -260px;
+        }
+        
+        #main-container { 
+            flex-grow: 1; 
+            min-width: 0; 
+            display: flex;
+            flex-direction: column;
+            /* サイドバーは transform で動くので main-container の幅変化は最小限 */
+        }
+
+        .sidebar-logo {
+            font-family: 'Syne', sans-serif;
+            font-weight: 800;
+            font-size: 13px;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            background: linear-gradient(135deg, #a89fff 0%, #7c6fff 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .sidebar-section-label {
+            font-family: 'Syne', sans-serif;
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+        }
+
+        .sidebar-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.5rem 0.75rem;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            margin-bottom: 2px;
+            border: 1px solid transparent;
+            white-space: nowrap; /* 幅が変わる際の中身の崩れを防止 */
+        }
+        .sidebar-item:hover { 
+            background: var(--bg-elevated); 
+            border-color: var(--border-subtle);
+        }
+        .sidebar-item.active-board { 
+            background: var(--accent-dim);
+            border-color: rgba(124, 111, 255, 0.2);
+            color: #c4bcff;
+        }
+        .sidebar-item.drag-over { 
+            background: var(--accent-dim) !important; 
+            border: 1px dashed rgba(124, 111, 255, 0.4) !important; 
+        }
+        .sidebar-item.dragging { opacity: 0.25; }
+
+        /* ── Header ── */
+        header {
+            background: rgba(15, 17, 23, 0.85);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        #activeBoardTitle {
+            font-family: 'Syne', sans-serif;
+            font-weight: 700;
+            font-size: 1.1rem;
+            letter-spacing: 0.02em;
+            color: var(--text-primary);
+        }
+
+        /* ── URL Input ── */
+        #urlInput {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-default);
+            color: var(--text-primary);
+            border-radius: 10px;
+            font-family: 'DM Sans', sans-serif;
+            font-size: 13px;
+            transition: all 0.2s ease;
+        }
+        #urlInput:focus {
+            border-color: rgba(124, 111, 255, 0.5);
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(124, 111, 255, 0.08);
+            background: var(--bg-hover);
+        }
+        #urlInput::placeholder { color: var(--text-muted); }
+
+        .save-btn {
+            background: linear-gradient(135deg, #8c7fff 0%, #6a5ff0 100%);
+            color: #fff;
+            font-family: 'Syne', sans-serif;
+            font-weight: 700;
+            font-size: 13px;
+            letter-spacing: 0.04em;
+            border-radius: 10px;
+            border: none;
+            transition: all 0.2s ease;
+            box-shadow: 0 2px 12px rgba(124, 111, 255, 0.25);
+        }
+        .save-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 20px rgba(124, 111, 255, 0.4);
+            filter: brightness(1.08);
+        }
+        .save-btn:active { transform: translateY(0); }
+
+        /* ── Icon Buttons ── */
+        .action-btn {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-default);
+            color: var(--text-secondary);
+            border-radius: 8px;
+            transition: all 0.15s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+        .action-btn:hover { 
+            background: var(--bg-hover);
+            border-color: var(--border-strong);
+            color: var(--text-primary);
+        }
+        .action-btn-sm { width: 2.25rem; height: 2.25rem; }
+        .action-btn-md { width: 2.5rem; height: 2.5rem; }
+
+        /* ── Search ── */
+        #searchContainer {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-default);
+            border-radius: 8px;
+            transition: all 0.2s ease;
+        }
+        #searchContainer:focus-within {
+            border-color: rgba(124, 111, 255, 0.4);
+            box-shadow: 0 0 0 3px rgba(124, 111, 255, 0.06);
+        }
+        #searchInput {
+            color: var(--text-primary);
+            font-family: 'DM Sans', sans-serif;
+            font-size: 12px;
+            transition: width 0.3s ease, opacity 0.2s ease;
+        }
+        #searchInput::placeholder { color: var(--text-muted); }
+
+        /* ── Tag filter ── */
+        #tagFilterList {
+            max-height: 0; opacity: 0; overflow: hidden;
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem;
+        }
+        #tagFilterList.expanded { 
+            max-height: 150px; opacity: 1; padding-top: 0.875rem; 
+            border-top: 1px solid var(--border-subtle); 
+        }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+
+        /* ── Cards ── */
+        .board-columns {
+            display: flex;
+            gap: 1.125rem;
+            align-items: flex-start;
+        }
+        .board-col {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 1.125rem;
+            min-width: 0;
+        }
+
+        .bookmark-card {
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: 14px;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+            transform: translateZ(0); /* ハードウェア加速 */
+            overflow: hidden;
+        }
+        .bookmark-card:hover { 
+            border-color: rgba(124, 111, 255, 0.25);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.35), 0 0 0 1px rgba(124,111,255,0.08);
+        }
+        .bookmark-card.dragging { opacity: 0.15; border-style: dashed; }
+        .bookmark-card.drag-over { border-top: 3px solid var(--accent); }
+
+        body.dragging-active iframe { pointer-events: none; }
+        
+        .drop-shield { 
+            display: block; position: absolute; inset: 0; z-index: 40; 
+            cursor: pointer;
+        }
+        .bookmark-card.is-active .drop-shield { display: none; }
+        body.dragging-active .drop-shield { display: block !important; }
+
+        /* Tweet container */
+        .tweet-wrapper {
+            background: var(--bg-elevated);
+            border-radius: 13px 13px 0 0;
+            position: relative;
+        }
+
+        /* Card info panel */
+        .card-info-panel {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease;
+            opacity: 0;
+            background: var(--bg-base);
+            border-top: 1px solid transparent;
+        }
+        .bookmark-card:hover .card-info-panel,
+        .bookmark-card:focus-within .card-info-panel,
+        .bookmark-card.is-active .card-info-panel {
+            max-height: 700px;
+            opacity: 1;
+            border-top-color: var(--border-subtle);
+        }
+        .card-info-inner { padding: 1.125rem; min-width: 100%; }
+
+        /* Labels */
+        .field-label {
+            font-family: 'Syne', sans-serif;
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            display: block;
+            margin-bottom: 6px;
+        }
+
+        /* Textarea */
+        .memo-textarea {
+            width: 100%;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-default);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-family: 'DM Sans', sans-serif;
+            font-size: 12px;
+            line-height: 1.6;
+            padding: 10px 12px;
+            resize: none;
+            outline: none;
+            min-height: 90px;
+            transition: border-color 0.15s, box-shadow 0.15s;
+        }
+        .memo-textarea::placeholder { color: var(--text-muted); }
+        .memo-textarea:focus { 
+            border-color: rgba(124,111,255,0.45);
+            box-shadow: 0 0 0 3px rgba(124,111,255,0.07);
+        }
+
+        /* Tag input */
+        .tag-input-wrap {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-default);
+            border-radius: 8px;
+            padding: 6px 10px;
+            transition: border-color 0.15s, box-shadow 0.15s;
+        }
+        .tag-input-wrap:focus-within {
+            border-color: rgba(124,111,255,0.45);
+            box-shadow: 0 0 0 3px rgba(124,111,255,0.07);
+        }
+        .tag-text-input {
+            background: transparent;
+            border: none;
+            color: var(--text-primary);
+            font-family: 'DM Sans', sans-serif;
+            font-size: 12px;
+            outline: none;
+            width: 100%;
+        }
+        .tag-text-input::placeholder { color: var(--text-muted); }
+
+        /* Tags */
+        .tag-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 9px;
+            border-radius: 9999px;
+            font-family: 'DM Sans', sans-serif;
+            font-size: 11px;
+            font-weight: 500;
+            line-height: 1.4;
+            transition: all 0.15s ease;
+            border: 1px solid transparent;
+        }
+        .tag-remove {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 13px;
+            height: 13px;
+            border-radius: 50%;
+            background: rgba(0,0,0,0.15);
+            cursor: pointer;
+            font-size: 10px;
+            transition: background 0.15s;
+            opacity: 0.7;
+        }
+        .tag-remove:hover { background: rgba(255,255,255,0.2); opacity: 1; }
+
+        .tag-suggest {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 9px;
+            border-radius: 9999px;
+            font-family: 'DM Sans', sans-serif;
+            font-size: 10px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            border: 1px dashed rgba(255, 255, 255, 0.12);
+            opacity: 0.55;
+        }
+        .tag-suggest:hover { opacity: 1; transform: translateY(-1px); border-style: solid; }
+
+        /* Delete button on card */
+        .card-delete-btn {
+            background: rgba(239, 68, 68, 0.85);
+            backdrop-filter: blur(8px);
+            border-radius: 9999px;
+            padding: 8px;
+            color: #fff;
+            transition: all 0.15s ease;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+            z-index: 50;
+        }
+        .card-delete-btn:hover { background: rgba(220, 38, 38, 0.95); transform: scale(1.08); }
+
+        /* Skeleton */
+        .skeleton-placeholder {
+            width: calc(100% - 1rem);
+            height: 320px;
+            margin: 0.5rem auto;
+            border-radius: 8px;
+            background: linear-gradient(90deg, var(--bg-elevated) 25%, var(--bg-hover) 50%, var(--bg-elevated) 75%);
+            background-size: 200% 100%;
+            animation: skeleton-shimmer 1.8s infinite linear;
+        }
+        @keyframes skeleton-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+        /* Modals */
+        .modal-box {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-default);
+            border-radius: 18px;
+            box-shadow: 0 32px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.03);
+        }
+        .modal-title {
+            font-family: 'Syne', sans-serif;
+            font-weight: 700;
+            font-size: 1rem;
+            letter-spacing: 0.01em;
+            color: var(--text-primary);
+        }
+        .modal-input {
+            width: 100%;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-default);
+            color: var(--text-primary);
+            font-family: 'DM Sans', sans-serif;
+            font-size: 14px;
+            padding: 10px 14px;
+            border-radius: 10px;
+            outline: none;
+            transition: all 0.2s;
+        }
+        .modal-input:focus {
+            border-color: rgba(124,111,255,0.5);
+            box-shadow: 0 0 0 3px rgba(124,111,255,0.08);
+        }
+        .modal-input::placeholder { color: var(--text-muted); }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #8c7fff 0%, #6a5ff0 100%);
+            color: #fff;
+            font-family: 'Syne', sans-serif;
+            font-weight: 700;
+            font-size: 13px;
+            padding: 8px 20px;
+            border-radius: 9px;
+            border: none;
+            transition: all 0.2s ease;
+            box-shadow: 0 2px 10px rgba(124, 111, 255, 0.25);
+        }
+        .btn-primary:hover { filter: brightness(1.1); transform: translateY(-1px); }
+
+        .btn-ghost {
+            color: var(--text-secondary);
+            font-family: 'DM Sans', sans-serif;
+            font-size: 13px;
+            padding: 8px 16px;
+            border-radius: 9px;
+            border: 1px solid var(--border-default);
+            background: transparent;
+            transition: all 0.15s ease;
+        }
+        .btn-ghost:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+        .btn-danger {
+            background: rgba(239, 68, 68, 0.15);
+            color: #fca5a5;
+            font-family: 'Syne', sans-serif;
+            font-weight: 700;
+            font-size: 13px;
+            padding: 8px 20px;
+            border-radius: 9px;
+            border: 1px solid rgba(239, 68, 68, 0.25);
+            transition: all 0.2s ease;
+        }
+        .btn-danger:hover { background: rgba(239,68,68,0.25); border-color: rgba(239,68,68,0.45); }
+
+        /* Help modal */
+        .help-step {
+            padding: 1rem 1.25rem;
+            border-radius: 12px;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            transition: border-color 0.2s ease;
+        }
+        .help-step:hover { border-color: rgba(124,111,255,0.2); }
+        .help-title {
+            font-family: 'Syne', sans-serif;
+            font-weight: 700;
+            font-size: 14px;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .help-important { 
+            margin-top: 8px;
+            padding: 10px 12px;
+            background: rgba(124,111,255,0.08);
+            border: 1px solid rgba(124,111,255,0.15);
+            border-radius: 8px;
+            color: #c4bcff;
+            font-size: 12px;
+            line-height: 1.7;
+        }
+
+        /* Toast */
+        #toast {
+            font-family: 'DM Sans', sans-serif;
+            font-size: 13px;
+            font-weight: 500;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-strong);
+            color: var(--text-primary);
+            backdrop-filter: blur(12px);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        }
+
+        /* Empty state */
+        #emptyState p {
+            font-family: 'Syne', sans-serif;
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+
+        /* Folder indent */
+        .folder-indent {
+            padding-left: 1rem;
+            border-left: 1px solid var(--border-subtle);
+            margin-left: 0.75rem;
+        }
+
+        /* ── Note Card ── */
+        .note-card-body {
+            padding: 1.125rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+            cursor: default;
+        }
+        .note-card-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-family: 'Syne', sans-serif;
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-bottom: 10px;
+        }
+        .note-title-input {
+            width: 100%;
+            background: transparent;
+            border: none;
+            outline: none;
+            font-family: 'Syne', sans-serif;
+            font-weight: 700;
+            font-size: 15px;
+            color: var(--text-primary);
+            line-height: 1.4;
+            resize: none;
+            padding: 0;
+            margin-bottom: 8px;
+            overflow: hidden;
+        }
+        .note-title-input::placeholder { color: var(--text-muted); }
+        .note-body-input {
+            width: 100%;
+            background: transparent;
+            border: none;
+            outline: none;
+            font-family: 'DM Sans', sans-serif;
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.7;
+            resize: none;
+            padding: 0;
+            min-height: 60px;
+        }
+        .note-body-input::placeholder { color: var(--text-muted); }
+        .note-divider {
+            border: none;
+            border-top: 1px solid var(--border-subtle);
+            margin: 12px 0;
+        }
+        .note-card-tags-section {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        /* ── YouTube Card ── */
+        .youtube-wrapper {
+            background: #000;
+            border-radius: 13px 13px 0 0;
+        }
+        .youtube-thumb-wrap {
+            position: relative;
+            width: 100%;
+            padding-bottom: 56.25%; /* 16:9 */
+            overflow: hidden;
+            cursor: pointer;
+        }
+        .youtube-thumb-wrap img {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transition: transform 0.3s ease;
+        }
+        .youtube-thumb-wrap:hover img {
+            transform: scale(1.03);
+        }
+
+        .add-note-btn {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-default);
+            color: var(--text-secondary);
+            font-family: 'Syne', sans-serif;
+            font-weight: 700;
+            font-size: 13px;
+            letter-spacing: 0.03em;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s ease;
+            white-space: nowrap;
+        }
+        .add-note-btn:hover {
+            background: var(--bg-hover);
+            border-color: rgba(124,111,255,0.3);
+            color: #c4bcff;
+        }
+    </style>
+</head>
+<body class="bg-[#0a0b0f] text-gray-100 min-h-screen flex overflow-hidden">
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="z-[100] shadow-2xl shrink-0">
+        <div class="sidebar-inner w-[260px] h-full flex flex-col">
+            <div class="p-5 border-b shrink-0" style="border-color: var(--border-subtle)">
+                <div class="flex justify-between items-center mb-4">
+                    <span class="sidebar-logo">BookMark Boards</span>
+                    <button onclick="toggleSidebar()" class="md:hidden text-xs font-bold uppercase tracking-wider px-2 py-1 rounded" style="color:var(--text-muted)">Close</button>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button onclick="openNewFolderModal()" class="action-btn action-btn-md" style="color:#a89fff" title="新規フォルダ"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg></button>
+                    <button onclick="openNewBoardModal()" class="action-btn action-btn-md" style="color:#6ee7b7" title="新規ボード"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg></button>
+                    <button onclick="exportData()" class="action-btn action-btn-md" style="color:#fcd34d" title="全体データ出力"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg></button>
+                    <button onclick="importData()" class="action-btn action-btn-md" style="color:#7dd3fc" title="データ/ボード取込"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg></button>
+                </div>
+            </div>
+            <div class="flex-grow overflow-y-auto p-3 space-y-0.5" id="boardList"></div>
+        </div>
+    </aside>
+
+    <!-- Main Container -->
+    <div id="main-container" class="flex flex-col h-screen overflow-hidden">
+        <header class="p-4 sticky top-0 z-[60] space-y-3">
+            <div class="flex flex-col md:flex-row gap-3 items-start md:items-center justify-between w-full">
+                <div class="flex items-center gap-3">
+                    <button onclick="toggleSidebar()" class="p-2 rounded-lg transition-all" style="color:var(--text-muted)" onmouseover="this.style.color='var(--text-primary)';this.style.background='var(--bg-elevated)'" onmouseout="this.style.color='var(--text-muted)';this.style.background='transparent'">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" /></svg>
+                    </button>
+                    <h2 id="activeBoardTitle" class="truncate drop-shadow-sm">Loading...</h2>
+                </div>
+                <div class="flex items-center gap-2 w-full md:w-auto">
+                    <input type="text" id="urlInput" placeholder="X または YouTube の URL を貼り付け..." class="px-4 py-2 flex-grow md:w-72 h-10" style="font-size:13px">
+                    <button onclick="addPost()" class="save-btn py-2 px-5 h-10 shrink-0">保存</button>
+                    <button onclick="addNoteCard()" class="add-note-btn py-2 px-4 h-10 shrink-0" title="テキストカードを作成"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg><span class="hidden sm:inline">メモ</span></button>
+                </div>
+            </div>
+            
+            <div class="flex items-center gap-1.5 justify-end">
+                <div id="searchContainer" onmouseleave="handleSearchMouseLeave()" class="flex items-center h-9 px-2 overflow-hidden" style="transition: all 0.2s">
+                    <button onclick="toggleSearch()" class="w-7 h-7 flex items-center justify-center shrink-0 transition-colors" style="color:var(--text-secondary)" onmouseover="this.style.color='var(--text-primary)'" onmouseout="this.style.color='var(--text-secondary)'">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                    </button>
+                    <input type="text" id="searchInput" oninput="handleSearch(this.value)" placeholder="検索..." class="w-0 opacity-0 border-none bg-transparent focus:ring-0 p-0" style="font-size:12px">
+                </div>
+                <button onclick="toggleFilter()" id="filterToggleBtn" class="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-all" style="color:var(--text-secondary);background:var(--bg-elevated);border:1px solid var(--border-default)" title="タグフィルターを表示" onmouseover="this.style.color='var(--text-primary)'" onmouseout="this.style.color='var(--text-secondary)'">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" /></svg>
+                </button>
+                <button onclick="openHelpModal()" class="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-all" style="color:var(--text-secondary);background:var(--bg-elevated);border:1px solid var(--border-default)" title="使い方ガイド" onmouseover="this.style.color='var(--text-primary)'" onmouseout="this.style.color='var(--text-secondary)'">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                </button>
+            </div>
+            <div id="tagFilterList" class="overflow-x-auto no-scrollbar w-full"></div>
+        </header>
+
+        <main class="flex-grow p-5 overflow-y-auto overflow-x-hidden" id="main-scroll">
+            <div id="emptyState" class="hidden flex flex-col items-center justify-center h-full" style="color:var(--text-muted)">
+                <p class="text-center">まだポストがありません。</p>
+            </div>
+            <div id="gallery" class="board-columns"></div>
+        </main>
+    </div>
+
+    <!-- Modals -->
+    <div id="modal-container" class="fixed inset-0 z-[200] hidden items-center justify-center p-4" style="background:rgba(0,0,0,0.75);backdrop-filter:blur(8px)">
+        <!-- New Board Modal -->
+        <div id="new-board-modal" class="hidden modal-box w-full max-w-md p-6 modal-enter">
+            <h3 class="modal-title mb-5">新規ボード作成</h3>
+            <input type="text" id="newBoardName" placeholder="ボード名" class="modal-input mb-5">
+            <div class="flex gap-2 justify-end">
+                <button onclick="closeModal()" class="btn-ghost">キャンセル</button>
+                <button onclick="confirmCreateBoard()" class="btn-primary">作成</button>
+            </div>
+        </div>
+        <!-- New Folder Modal -->
+        <div id="new-folder-modal" class="hidden modal-box w-full max-w-md p-6 modal-enter">
+            <h3 class="modal-title mb-5">新規フォルダ作成</h3>
+            <input type="text" id="newFolderName" placeholder="フォルダ名" class="modal-input mb-5">
+            <div class="flex gap-2 justify-end">
+                <button onclick="closeModal()" class="btn-ghost">キャンセル</button>
+                <button onclick="confirmCreateFolder()" class="btn-primary">作成</button>
+            </div>
+        </div>
+        <!-- Rename Modal -->
+        <div id="rename-modal" class="hidden modal-box w-full max-w-md p-6 modal-enter">
+            <h3 class="modal-title mb-5">名前を変更</h3>
+            <input type="text" id="renameInput" placeholder="新しい名前" class="modal-input mb-5">
+            <div class="flex gap-2 justify-end">
+                <button onclick="closeModal()" class="btn-ghost">キャンセル</button>
+                <button id="confirmRenameBtn" class="btn-primary">変更を保存</button>
+            </div>
+        </div>
+        <!-- Board Export Modal -->
+        <div id="export-board-modal" class="hidden modal-box w-full max-w-md p-6 modal-enter">
+            <h3 class="modal-title mb-5 text-amber-400">ボードを書き出す</h3>
+            <p class="text-xs text-gray-500 mb-4">保存するファイル名を決めてください。</p>
+            <input type="text" id="exportFileName" placeholder="ファイル名" class="modal-input mb-5">
+            <div class="flex gap-3 justify-end">
+                <button onclick="closeModal()" class="btn-ghost">キャンセル</button>
+                <button onclick="confirmExportBoard()" class="btn-primary" style="background:linear-gradient(135deg, #f59e0b 0%, #d97706 100%)">書き出す</button>
+            </div>
+        </div>
+        <!-- Confirmation Modal -->
+        <div id="confirm-modal" class="hidden modal-box w-full max-w-sm p-7 modal-enter text-gray-100">
+            <p id="confirmMessage" class="text-sm text-gray-400 mb-8 text-center leading-relaxed"></p>
+            <div class="flex gap-2 justify-center">
+                <button onclick="closeModal()" class="btn-ghost">キャンセル</button>
+                <button id="executeConfirmBtn" class="btn-danger">削除</button>
+            </div>
+        </div>
+        <!-- Help Modal -->
+        <div id="help-modal" class="hidden modal-box w-full max-w-2xl p-7 modal-enter max-h-[85vh] overflow-y-auto">
+            <div class="flex justify-between items-center mb-6">
+                <h3 class="flex items-center gap-3" style="font-family:'Syne',sans-serif;font-weight:800;font-size:1.25rem;color:#a89fff">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                    使い方ガイド
+                </h3>
+                <button onclick="closeModal()" class="w-9 h-9 flex items-center justify-center rounded-full transition-all" style="color:var(--text-muted)" onmouseover="this.style.background='var(--bg-hover)';this.style.color='var(--text-primary)'" onmouseout="this.style.background='transparent';this.style.color='var(--text-muted)'">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+            </div>
+            <div class="space-y-3" style="color:var(--text-primary)">
+
+                <!-- カードを追加する -->
+                <div class="help-step">
+                    <h4 class="help-title">カードを追加する</h4>
+                    <p class="text-sm leading-relaxed" style="color:var(--text-secondary)">上部の入力欄に <strong style="color:var(--text-primary)">X（旧Twitter）または YouTube の URL</strong> を貼り付けて「保存」を押すと、そのポスト・動画がカードとしてボードに追加されます。Enter キーでも保存できます。同じ URL はすでに保存済みと判定され重複追加されません。</p>
+                    <p class="text-sm leading-relaxed mt-2" style="color:var(--text-secondary)">テキストメモを残したい場合は「<strong style="color:var(--text-primary)">メモ</strong>」ボタンから自由記述カードを作成できます。</p>
+                </div>
+
+                <!-- タグ・検索・フィルター -->
+                <div class="help-step">
+                    <h4 class="help-title">タグ・検索・絞り込み</h4>
+                    <p class="text-sm leading-relaxed" style="color:var(--text-secondary)">カードにホバーすると下部にメモ欄とタグ入力欄が開きます。タグ名を入力して <strong style="color:var(--text-primary)">Enter</strong> キーで追加。以前付けたタグはワンクリックで再利用できます。</p>
+                    <p class="text-sm leading-relaxed mt-2" style="color:var(--text-secondary)">ヘッダー右の <strong style="color:var(--text-primary)">タグアイコン</strong> を押すとタグフィルターが展開されます。タグを複数選択すると <strong style="color:var(--text-primary)">AND 条件</strong>（すべてのタグを持つカードだけ）で絞り込めます。選択解除は「✕ クリア」ボタンで一括リセットできます。</p>
+                    <p class="text-sm leading-relaxed mt-2" style="color:var(--text-secondary)">ヘッダー右の <strong style="color:var(--text-primary)">虫眼鏡アイコン</strong> をクリックすると検索バーが展開します。メモ・メモカードのタイトルや本文をリアルタイムで絞り込みます。検索バーからマウスを外すと自動的に閉じます。</p>
+                </div>
+
+                <!-- ボードとフォルダ -->
+                <div class="help-step">
+                    <h4 class="help-title">ボードとフォルダで分類する</h4>
+                    <p class="text-sm leading-relaxed" style="color:var(--text-secondary)">サイドバーの <strong style="color:var(--text-primary)">各アイコン</strong> からボードやフォルダを作成できます。ボード名の横にある鉛筆アイコンで名前の変更、書き出しアイコンでそのボードだけを JSON ファイルとして出力できます。</p>
+                    <p class="text-sm leading-relaxed mt-2" style="color:var(--text-secondary)">ボードをフォルダ内にドラッグ＆ドロップするとフォルダへ移動できます。フォルダをクリックすると折りたたみ／展開できます。</p>
+                </div>
+
+                <!-- ドラッグ＆ドロップ -->
+                <div class="help-step">
+                    <h4 class="help-title">ドラッグ＆ドロップで並び替え・複製</h4>
+                    <p class="text-sm leading-relaxed" style="color:var(--text-secondary)">カードをつかんで別のカードの上にドロップすると <strong style="color:var(--text-primary)">順番を入れ替え</strong> できます。サイドバーの別のボードへドロップすると、そのカードを <strong style="color:var(--text-primary)">複製（コピー）</strong> してボードへ追加します（元のボードからは削除されません）。</p>
+                </div>
+
+                <!-- データ保存 -->
+                <div class="help-step">
+                    <h4 class="help-title">データの保存とバックアップ</h4>
+                    <div class="help-important">
+                        <p><span style="color:#a89fff;font-weight:600">● Canvas 環境（claude.ai）：</span>編集内容は自動的にクラウドへ保存されます。</p>
+                        <p class="mt-1"><span style="color:#a89fff;font-weight:600">● ブラウザ単体で使う場合：</span>データはブラウザのローカルストレージに保存されます。ブラウザのデータを消去するとデータも消えます。サイドバーの <strong>データ出力アイコン</strong> から定期的に JSON バックアップを取っておくことを強くおすすめします。バックアップはデータ取込アイコンから復元できます。</p>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <input type="file" id="importFile" class="hidden" accept=".json">
+    <div id="toast" class="fixed bottom-8 left-1/2 transform -translate-x-1/2 px-5 py-2.5 rounded-xl shadow-2xl transition-all duration-300 opacity-0 pointer-events-none z-[300]"></div>
+
+    <script>
+        const TAG_COLORS = [
+            { bg: 'rgba(99, 102, 241, 0.15)', text: '#a5b4fc', border: 'rgba(99, 102, 241, 0.25)' }, 
+            { bg: 'rgba(16, 185, 129, 0.15)', text: '#6ee7b7', border: 'rgba(16, 185, 129, 0.25)' }, 
+            { bg: 'rgba(245, 158, 11, 0.15)', text: '#fcd34d', border: 'rgba(245, 158, 11, 0.25)' }, 
+            { bg: 'rgba(239, 68, 68, 0.15)', text: '#fca5a5', border: 'rgba(239, 68, 68, 0.25)' },   
+            { bg: 'rgba(14, 165, 233, 0.15)', text: '#7dd3fc', border: 'rgba(14, 165, 233, 0.25)' }
+        ];
+
+        const ICONS = {
+            trash: `<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>`,
+            edit: `<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>`,
+            export: `<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>`,
+            chevronDown: `<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M19 9l-7 7-7-7" /></svg>`,
+            chevronRight: `<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M9 5l7 7-7 7" /></svg>`,
+            tag: `<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" /></svg>`,
+            external: `<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>`
+        };
+
+        function getTagStyle(tagName) {
+            let hash = 0; for (let i = 0; i < tagName.length; i++) hash = tagName.charCodeAt(i) + ((hash << 5) - hash);
+            const color = TAG_COLORS[Math.abs(hash) % TAG_COLORS.length]; return `background: ${color.bg}; color: ${color.text}; border-color: ${color.border};`;
+        }
+
+        function showToast(msg) {
+            const t = document.getElementById('toast'); t.textContent = msg; t.style.opacity = '1'; t.style.transform = 'translate(-50%, -10px)';
+            setTimeout(() => { t.style.opacity = '0'; t.style.transform = 'translate(-50%, 0)'; }, 2000);
+        }
+
+        function openConfirmModal(message, action) {
+            const container = document.getElementById('modal-container');
+            container.classList.remove('hidden'); container.classList.add('flex');
+            document.querySelectorAll('#modal-container > div').forEach(el => el.classList.add('hidden'));
+            const modal = document.getElementById('confirm-modal');
+            document.getElementById('confirmMessage').textContent = message;
+            modal.classList.remove('hidden');
+            window.appState.pendingAction = action;
+            document.getElementById('executeConfirmBtn').onclick = () => {
+                if(window.appState.pendingAction) window.appState.pendingAction();
+                closeModal();
+            };
+        }
+
+        function closeModal() { 
+            const c = document.getElementById('modal-container');
+            c.classList.add('hidden'); c.classList.remove('flex');
+            document.querySelectorAll('#modal-container > div').forEach(el => el.classList.add('hidden')); 
+            document.querySelectorAll('input').forEach(el => el.value = ''); 
+            window.appState.pendingAction = null;
+            window.appState.exportingBoardId = null;
+        }
+
+        function openNewBoardModal() { const c = document.getElementById('modal-container'); c.classList.remove('hidden'); c.classList.add('flex'); document.querySelectorAll('#modal-container > div').forEach(el => el.classList.add('hidden')); document.getElementById('new-board-modal').classList.remove('hidden'); document.getElementById('newBoardName').focus(); }
+        function openNewFolderModal() { const c = document.getElementById('modal-container'); c.classList.remove('hidden'); c.classList.add('flex'); document.querySelectorAll('#modal-container > div').forEach(el => el.classList.add('hidden')); document.getElementById('new-folder-modal').classList.remove('hidden'); document.getElementById('newFolderName').focus(); }
+        function openRenameModal(id, currentName, isBoard, e) {
+            if(e) e.stopPropagation(); const c = document.getElementById('modal-container'); c.classList.remove('hidden'); c.classList.add('flex');
+            document.querySelectorAll('#modal-container > div').forEach(el => el.classList.add('hidden')); const modal = document.getElementById('rename-modal'); const input = document.getElementById('renameInput'); input.value = currentName; modal.classList.remove('hidden'); input.focus();
+            document.getElementById('confirmRenameBtn').onclick = async () => {
+                const name = input.value.trim(); if(!name) return; const data = JSON.parse(JSON.stringify(window.appState.appData));
+                if(isBoard) { const b = data.boards.find(b => String(b.id) === String(id)); if(b) b.name = name; } else { const f = data.folders.find(f => String(f.id) === String(id)); if(f) f.name = name; }
+                await window.saveData(data); closeModal(); showToast("変更しました");
+            };
+        }
+        function openHelpModal() { const c = document.getElementById('modal-container'); c.classList.remove('hidden'); c.classList.add('flex'); document.querySelectorAll('#modal-container > div').forEach(el => el.classList.add('hidden')); document.getElementById('help-modal').classList.remove('hidden'); }
+
+        function openExportBoardModal(id, e) {
+            if(e) e.stopPropagation();
+            const board = window.appState.appData.boards.find(b => String(b.id) === String(id));
+            if(!board) return;
+            window.appState.exportingBoardId = id;
+            const c = document.getElementById('modal-container');
+            c.classList.remove('hidden'); c.classList.add('flex');
+            document.querySelectorAll('#modal-container > div').forEach(el => el.classList.add('hidden'));
+            const modal = document.getElementById('export-board-modal');
+            const input = document.getElementById('exportFileName');
+            input.value = `board_${board.name.replace(/[\s\W]/g, '_')}`;
+            modal.classList.remove('hidden');
+            input.focus();
+        }
+
+        function confirmExportBoard() {
+            const id = window.appState.exportingBoardId;
+            const filename = document.getElementById('exportFileName').value.trim() || 'board_export';
+            const board = window.appState.appData.boards.find(b => String(b.id) === String(id));
+            if(!board) return;
+            const exportData = { type: 'single_board', version: '1.0', data: board };
+            const dataStr = JSON.stringify(exportData, null, 2);
+            const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+            const link = document.createElement('a');
+            link.setAttribute('href', dataUri);
+            link.setAttribute('download', `${filename}.json`);
+            link.click();
+            closeModal();
+            showToast('ボードを書き出しました');
+        }
+
+        async function confirmCreateBoard() {
+            const name = document.getElementById('newBoardName').value.trim(); if (!name) return;
+            const newId = Date.now().toString(); const data = JSON.parse(JSON.stringify(window.appState.appData));
+            data.boards.push({ id: newId, name: name, posts: [], folderId: null }); data.activeBoardId = newId;
+            await window.saveData(data); closeModal(); showToast("ボード作成完了");
+        }
+        async function confirmCreateFolder() {
+            const name = document.getElementById('newFolderName').value.trim(); if (!name) return;
+            const newId = 'folder-' + Date.now().toString(); const data = JSON.parse(JSON.stringify(window.appState.appData));
+            data.folders.push({ id: newId, name: name, expanded: true });
+            await window.saveData(data); closeModal(); showToast("フォルダ作成完了");
+        }
+
+        function selectBoard(id) {
+            const boardId = String(id); const data = JSON.parse(JSON.stringify(window.appState.appData));
+            data.activeBoardId = boardId; window.appState.searchQuery = ""; window.appState.selectedTags = [];
+            const input = document.getElementById('searchInput'); if (input) input.value = "";
+            window.saveData(data); if (window.innerWidth < 768) toggleSidebar();
+        }
+        function toggleSidebar() { document.getElementById('sidebar').classList.toggle('closed'); }
+        function handleSearch(val) { window.appState.searchQuery = val.toLowerCase(); renderActiveBoard(); }
+        function clearTagFilters() {
+            window.appState.selectedTags = [];
+            if (window.appState.isFilterExpanded) updateFilterTagsUI();
+            renderActiveBoard();
+        }
+
+        function selectTagFilter(tag) {
+            const tags = window.appState.selectedTags;
+            const idx = tags.indexOf(tag);
+            if (idx === -1) tags.push(tag);
+            else tags.splice(idx, 1);
+            window.appState.selectedTags = tags;
+            if (window.appState.isFilterExpanded) updateFilterTagsUI();
+            renderActiveBoard();
+        }
+        function toggleSearch() {
+            const input = document.getElementById('searchInput'); window.appState.isSearchExpanded = !window.appState.isSearchExpanded;
+            if (window.appState.isSearchExpanded) { input.classList.replace('w-0', 'w-64'); input.classList.replace('opacity-0', 'opacity-100'); input.classList.add('px-3'); input.focus(); }
+            else { input.classList.replace('w-64', 'w-0'); input.classList.replace('opacity-100', 'opacity-0'); input.classList.remove('px-3'); }
+        }
+        function handleSearchMouseLeave() { const input = document.getElementById('searchInput'); if (!input.value && window.appState.isSearchExpanded) toggleSearch(); }
+        function toggleFilter() {
+            const list = document.getElementById('tagFilterList'); const btn = document.getElementById('filterToggleBtn'); window.appState.isFilterExpanded = !window.appState.isFilterExpanded;
+            if (window.appState.isFilterExpanded) { list.classList.add('expanded'); btn.classList.add('bg-indigo-500/10', 'text-indigo-400'); updateFilterTagsUI(); }
+            else { list.classList.remove('expanded'); btn.classList.remove('bg-indigo-500/10', 'text-indigo-400'); }
+        }
+
+        function handleDragStartPost(id, e) {
+            window.appState.draggedPostId = id; window.appState.draggedBoardId = null;
+            e.dataTransfer.setData('text/plain', id); e.dataTransfer.effectAllowed = 'move';
+            document.body.classList.add('dragging-active'); e.currentTarget.classList.add('dragging');
+        }
+        function handleDragStartBoard(id, e) {
+            window.appState.draggedBoardId = id; window.appState.draggedPostId = null;
+            e.dataTransfer.setData('text/plain', id); e.dataTransfer.effectAllowed = 'move';
+            e.currentTarget.classList.add('dragging');
+        }
+        function handleDragEnd(e) {
+            document.body.classList.remove('dragging-active'); e.currentTarget.classList.remove('dragging');
+            document.querySelectorAll('.bookmark-card, .sidebar-item').forEach(el => el.classList.remove('drag-over'));
+        }
+        function handleDragOver(e) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; e.currentTarget.classList.add('drag-over'); }
+        function handleDragLeave(e) { e.currentTarget.classList.remove('drag-over'); }
+
+        async function handleDropPostOnPost(targetPostId, e) {
+            e.preventDefault(); const draggedId = window.appState.draggedPostId;
+            if (!draggedId || draggedId === targetPostId) return;
+            const data = JSON.parse(JSON.stringify(window.appState.appData));
+            const board = data.boards.find(b => String(b.id) === String(data.activeBoardId));
+            if (!board) return;
+            const fromIdx = board.posts.findIndex(p => p.id === draggedId);
+            const toIdx = board.posts.findIndex(p => p.id === targetPostId);
+            if (fromIdx !== -1 && toIdx !== -1) { const [moved] = board.posts.splice(fromIdx, 1); board.posts.splice(toIdx, 0, moved); await window.saveData(data); }
+        }
+
+        async function handleDropOnSidebarItem(itemId, isBoard, e) {
+            e.preventDefault(); const data = JSON.parse(JSON.stringify(window.appState.appData));
+            if (window.appState.draggedPostId && isBoard) {
+                const src = data.boards.find(b => String(b.id) === String(data.activeBoardId));
+                const tgt = data.boards.find(b => String(b.id) === String(itemId));
+                if (!src || !tgt || src.id === tgt.id) return;
+                const orig = src.posts.find(p => p.id === window.appState.draggedPostId);
+                if (orig && !tgt.posts.some(p => p.url === orig.url)) {
+                    tgt.posts.unshift({ ...orig, id: Date.now().toString() + Math.random().toString(36).substr(2, 5) });
+                    await window.saveData(data); showToast(`${tgt.name} に複製しました`);
+                }
+            } else if (window.appState.draggedBoardId && isBoard) {
+                const fromIdx = data.boards.findIndex(b => String(b.id) === String(window.appState.draggedBoardId));
+                const toIdx = data.boards.findIndex(b => String(b.id) === String(itemId));
+                if (fromIdx !== -1 && toIdx !== -1) { const [moved] = data.boards.splice(fromIdx, 1); moved.folderId = data.boards[toIdx > fromIdx ? toIdx : toIdx]?.folderId || null; data.boards.splice(toIdx, 0, moved); await window.saveData(data); }
+            } else if (window.appState.draggedBoardId && !isBoard) {
+                const board = data.boards.find(b => String(b.id) === String(window.appState.draggedBoardId));
+                if (board) { board.folderId = itemId; await window.saveData(data); }
+            }
+        }
+
+        function renderSidebar() {
+            const list = document.getElementById('boardList'); if (!list) return; list.innerHTML = '';
+            const data = window.appState.appData;
+            const renderItem = (item, isBoard) => {
+                const isActive = isBoard && String(item.id) === String(data.activeBoardId);
+                const div = document.createElement('div');
+                div.className = `sidebar-item group ${isActive ? 'active-board' : ''}`;
+                if (isBoard) {
+                    div.setAttribute('draggable', 'true'); div.ondragstart = (e) => handleDragStartBoard(item.id, e);
+                    div.onclick = () => selectBoard(item.id);
+                } else { div.onclick = (e) => toggleFolder(item.id, e); }
+                div.ondragover = handleDragOver; div.ondragleave = handleDragLeave;
+                div.ondrop = (e) => { e.currentTarget.classList.remove('drag-over'); handleDropOnSidebarItem(item.id, isBoard, e); };
+                div.ondragend = handleDragEnd;
+                let icon = isBoard 
+                    ? `<span class="mr-2" style="opacity:0.4"><svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M8 9h8m-8 6h8" /></svg></span>` 
+                    : `<span class="mr-2" style="color:var(--text-muted)">${item.expanded ? ICONS.chevronDown : ICONS.chevronRight}</span>`;
+                
+                let actions = `<div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all" style="color:var(--text-secondary)">`;
+                if(isBoard) {
+                    actions += `<button onclick="openExportBoardModal('${item.id}', event)" class="p-1.5 rounded-md transition-colors hover:text-amber-400 hover:bg-amber-400/10" title="ボードを書き出す">${ICONS.export}</button>`;
+                }
+                actions += `<button onclick="openRenameModal('${item.id}', '${item.name}', ${isBoard}, event)" class="p-1.5 rounded-md transition-colors hover:text-blue-400 hover:bg-blue-400/10">${ICONS.edit}</button><button onclick="${isBoard?'deleteBoard':'deleteFolder'}('${item.id}', event)" class="p-1.5 rounded-md transition-colors hover:text-red-400 hover:bg-red-400/10">${ICONS.trash}</button></div>`;
+                
+                div.innerHTML = `<div class="truncate flex items-center min-w-0">${icon}<span class="text-xs font-semibold truncate">${item.name}</span></div>${actions}`;
+                return div;
+            };
+            data.folders.forEach(f => {
+                list.appendChild(renderItem(f, false));
+                if (f.expanded) {
+                    const sub = document.createElement('div'); sub.className = "folder-indent space-y-0.5 mb-3 mt-0.5";
+                    data.boards.filter(b => String(b.folderId) === String(f.id)).forEach(b => sub.appendChild(renderItem(b, true))); list.appendChild(sub);
+                }
+            });
+            const roots = data.boards.filter(b => !b.folderId);
+            if (roots.length > 0) {
+                const d = document.createElement('div'); d.className = "sidebar-section-label mt-6 mb-2 px-1";
+                d.textContent = "未分類"; list.appendChild(d); roots.forEach(b => list.appendChild(renderItem(b, true)));
+            }
+        }
+
+        function parseYouTubeId(url) {
+            // 通常: youtube.com/watch?v=ID, youtu.be/ID, /embed/ID, /shorts/ID
+            const patterns = [
+                /[?&]v=([a-zA-Z0-9_-]{11})/,
+                /youtu\.be\/([a-zA-Z0-9_-]{11})/,
+                /\/embed\/([a-zA-Z0-9_-]{11})/,
+                /\/shorts\/([a-zA-Z0-9_-]{11})/,
+            ];
+            for (const p of patterns) {
+                const m = url.match(p);
+                if (m) return m[1];
+            }
+            return null;
+        }
+
+        async function addPost() {
+            const input = document.getElementById('urlInput'); const url = input.value.trim();
+            if (!url) return;
+            const data = JSON.parse(JSON.stringify(window.appState.appData));
+            const board = data.boards.find(b => String(b.id) === String(data.activeBoardId)); if (!board) return showToast("ボード選択して");
+            if (board.posts.some(p => p.url === url)) return showToast("追加済み");
+            window.appState.searchQuery = ""; window.appState.selectedTag = "";
+            const searchInput = document.getElementById('searchInput'); if (searchInput) searchInput.value = "";
+
+            const youtubeId = parseYouTubeId(url);
+            if (youtubeId) {
+                board.posts.unshift({ type: 'youtube', url, id: Date.now().toString() + Math.random().toString(36).substr(2, 5), youtubeId, memo: "", tags: [] });
+                await window.saveData(data); input.value = ''; showToast("追加しました");
+                return;
+            }
+
+            const tweetId = (url.match(/\/status\/(\d+)/) || [])[1];
+            if (!tweetId) return showToast("URLが無効（X または YouTube のURLを入力してください）");
+            board.posts.unshift({ type: 'tweet', url, id: Date.now().toString() + Math.random().toString(36).substr(2, 5), tweetId, memo: "", tags: [] });
+            await window.saveData(data); input.value = ''; showToast("追加しました");
+        }
+
+        async function addNoteCard() {
+            const data = JSON.parse(JSON.stringify(window.appState.appData));
+            const board = data.boards.find(b => String(b.id) === String(data.activeBoardId)); if (!board) return showToast("ボード選択して");
+            window.appState.searchQuery = ""; window.appState.selectedTags = [];
+            const searchInput = document.getElementById('searchInput'); if (searchInput) searchInput.value = "";
+            const newNote = { type: 'note', id: Date.now().toString() + Math.random().toString(36).substr(2, 5), title: "", body: "", tags: [] };
+            board.posts.unshift(newNote);
+            await window.saveData(data);
+            showToast("テキストカードを追加しました");
+            setTimeout(() => {
+                const titleEl = document.getElementById('note-title-' + newNote.id);
+                if (titleEl) titleEl.focus();
+            }, 150);
+        }
+
+        function removePost(id) {
+            const board = window.appState.appData.boards.find(b => String(b.id) === String(window.appState.appData.activeBoardId));
+            const post = board && board.posts.find(p => p.id === id);
+            const msg = post && post.type === 'note' ? "このテキストカードを削除しますか？" : "このポストを削除しますか？";
+            openConfirmModal(msg, async () => {
+                const data = JSON.parse(JSON.stringify(window.appState.appData));
+                const board = data.boards.find(b => String(b.id) === String(window.appState.appData.activeBoardId));
+                if (board) { board.posts = board.posts.filter(p => p.id !== id); await window.saveData(data); showToast("削除しました"); }
+            });
+        }
+        async function deleteBoard(id, e) {
+            if(e) e.stopPropagation(); if (window.appState.appData.boards.length <= 1) return showToast("最低1つ必要");
+            openConfirmModal("このボードを削除しますか？", async () => {
+                const data = JSON.parse(JSON.stringify(window.appState.appData));
+                data.boards = data.boards.filter(b => String(b.id) !== String(id));
+                if (String(data.activeBoardId) === String(id)) data.activeBoardId = data.boards[0]?.id || null;
+                await window.saveData(data);
+            });
+        }
+        async function deleteFolder(id, e) {
+            if(e) e.stopPropagation();
+            openConfirmModal("このフォルダを削除しますか？", async () => {
+                const data = JSON.parse(JSON.stringify(window.appState.appData));
+                data.folders = data.folders.filter(f => String(f.id) !== String(id));
+                data.boards.forEach(b => { if (String(b.folderId) === String(id)) b.folderId = null; });
+                await window.saveData(data);
+            });
+        }
+        function toggleFolder(id, e) { if(e) e.stopPropagation(); const d = JSON.parse(JSON.stringify(window.appState.appData)); const f = d.folders.find(f => String(f.id) === String(id)); if(f){f.expanded = !f.expanded; window.saveData(d);} }
+        async function updatePostField(id, f, v) { const d = JSON.parse(JSON.stringify(window.appState.appData)); const board = d.boards.find(b => String(b.id) === String(d.activeBoardId)); const p = board?.posts.find(p => p.id === id); if (p) { p[f] = v; await window.saveData(d, true); } }
+        async function addTag(id, t) {
+            t = t.trim(); if (!t) return; const d = JSON.parse(JSON.stringify(window.appState.appData)); const board = d.boards.find(b => String(b.id) === String(d.activeBoardId)); const p = board?.posts.find(p => p.id === id);
+            if (p) { if (!p.tags) p.tags = []; if (!p.tags.includes(t)) { p.tags.push(t); await window.saveData(d, true); renderTags(id, p.tags); updateSuggestedTags(id); if (window.appState.isFilterExpanded) updateFilterTagsUI(); } }
+        }
+        async function removeTag(id, t) {
+            const d = JSON.parse(JSON.stringify(window.appState.appData)); const board = d.boards.find(b => String(b.id) === String(d.activeBoardId)); const p = board?.posts.find(p => p.id === id);
+            if (p && p.tags) { p.tags = p.tags.filter(tg => tg !== t); await window.saveData(d, true); renderTags(id, p.tags); updateSuggestedTags(id); if (window.appState.isFilterExpanded) updateFilterTagsUI(); }
+        }
+        function renderTags(id, t) { const el = document.getElementById(`tags-display-${id}`); if (el) el.innerHTML = (t || []).map(tg => `<span class="tag-pill shadow-sm" style="${getTagStyle(tg)}">#${tg}<span class="tag-remove" onclick="removeTag('${id}', '${tg}')">×</span></span>`).join(''); }
+        function updateSuggestedTags(id) {
+            const el = document.getElementById(`tags-suggested-${id}`); if (!el) return; const board = window.appState.appData.boards.find(b => String(b.id) === String(window.appState.appData.activeBoardId)); if (!board) return; const p = board.posts.find(p => p.id === id); if (!p) return;
+            const a = [...new Set(board.posts.flatMap(p => p.tags || []))].sort(); const s = a.filter(tg => !(p.tags || []).includes(tg));
+            if (!s.length) { el.classList.add('hidden'); return; } el.classList.remove('hidden'); el.innerHTML = s.map(tg => `<div class="tag-suggest shadow-inner" style="${getTagStyle(tg)}" onclick="addTag('${id}', '${tg}')">+ ${tg}</div>`).join('');
+        }
+        function updateFilterTagsUI() {
+            const board = window.appState.appData.boards.find(b => String(b.id) === String(window.appState.appData.activeBoardId)); const el = document.getElementById('tagFilterList'); if (!board || !el) return;
+            const a = [...new Set(board.posts.flatMap(p => p.tags || []))].sort(); if (!a.length) { el.innerHTML = `<span class="text-xs italic px-2" style="color:var(--text-muted)">タグがありません</span>`; return; }
+            const selected = window.appState.selectedTags;
+            el.innerHTML = a.map(t => {
+                const isActive = selected.includes(t);
+                const count = board.posts.filter(p => (p.tags||[]).includes(t)).length;
+                return `<button onclick="selectTagFilter('${t}')" class="tag-pill transition-all ${isActive ? 'shadow-lg brightness-110 ring-1 ring-indigo-500/50' : 'opacity-60 hover:opacity-100'}" style="${getTagStyle(t)}${isActive ? ';outline:1.5px solid rgba(124,111,255,0.5)' : ''}">${t}<span style="opacity:0.6;font-size:9px;margin-left:3px">${count}</span></button>`;
+            }).join('');
+            // 選択中タグがある場合はクリアボタンを追加
+            if (selected.length > 0) {
+                el.innerHTML += `<button onclick="clearTagFilters()" class="tag-pill transition-all opacity-70 hover:opacity-100" style="background:rgba(239,68,68,0.12);color:#fca5a5;border-color:rgba(239,68,68,0.25);margin-left:4px">✕ クリア</button>`;
+            }
+        }
+
+        function buildCard(p) {
+            if (!p.type) p.type = 'tweet'; // 旧データ後方互換
+            const card = document.createElement('div');
+            card.className = 'bookmark-card group shadow-lg cursor-grab active:cursor-grabbing';
+            card.setAttribute('data-id', p.id);
+            card.setAttribute('draggable', 'true');
+            card.ondragstart = (e) => handleDragStartPost(p.id, e);
+            card.ondragend = handleDragEnd;
+            card.ondragover = handleDragOver;
+            card.ondragleave = (e) => { e.currentTarget.classList.remove('drag-over'); e.currentTarget.classList.remove('is-active'); };
+            card.ondrop = (e) => handleDropPostOnPost(p.id, e);
+            card.onmouseleave = () => card.classList.remove('is-active');
+            card.onclick = (e) => {
+                if (e.target.closest('button') || e.target.closest('textarea') || e.target.closest('input') || e.target.closest('a')) return;
+                card.classList.toggle('is-active');
+            };
+
+            const tagSection = `
+                <hr class="note-divider">
+                <div class="note-card-tags-section">
+                    <div id="tags-display-${p.id}" class="flex flex-wrap gap-1.5"></div>
+                    <div id="tags-suggested-${p.id}" class="flex flex-wrap gap-1.5"></div>
+                    <div class="tag-input-wrap"><span style="color:var(--text-muted)">${ICONS.tag}</span><input type="text" placeholder="Enterでタグ追加..." class="tag-text-input" onfocus="window.appState.isEditing = true" onblur="window.appState.isEditing = false" onkeydown="if(event.key === 'Enter' && !event.isComposing) { event.preventDefault(); addTag('${p.id}', this.value); this.value=''; }"></div>
+                </div>`;
+
+            if (p.type === 'note') {
+                // ── テキストカード ──
+                card.innerHTML = `
+                    <div class="note-card-body">
+                        <div class="flex justify-between items-start">
+                            <span class="note-card-badge">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                                Note
+                            </span>
+                            <button onclick="removePost('${p.id}')" class="card-delete-btn flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all" style="padding:6px">${ICONS.trash}</button>
+                        </div>
+                        <textarea id="note-title-${p.id}" class="note-title-input" placeholder="タイトル..." rows="1"
+                            onfocus="window.appState.isEditing = true"
+                            onblur="window.appState.isEditing = false; updatePostField('${p.id}','title',this.value)"
+                            oninput="autoResizeTextarea(this)"
+                        >${p.title || ''}</textarea>
+                        <textarea id="note-body-${p.id}" class="note-body-input" placeholder="本文を入力..."
+                            onfocus="window.appState.isEditing = true"
+                            onblur="window.appState.isEditing = false; updatePostField('${p.id}','body',this.value)"
+                            oninput="autoResizeTextarea(this)"
+                        >${p.body || ''}</textarea>
+                        ${tagSection}
+                    </div>`;
+            } else if (p.type === 'youtube') {
+                // ── YouTubeカード ──
+                card.innerHTML = `
+                    <div class="relative w-full youtube-wrapper overflow-hidden">
+                        <div class="drop-shield"></div>
+                        <div class="absolute top-3 right-3 z-50 opacity-0 group-hover:opacity-100 transition-all scale-90 group-hover:scale-100">
+                            <button onclick="removePost('${p.id}')" class="card-delete-btn flex items-center justify-center">${ICONS.trash}</button>
+                        </div>
+                        <div class="youtube-thumb-wrap" onclick="window.open('https://www.youtube.com/watch?v=${p.youtubeId}', '_blank')">
+                            <img
+                                src="https://i.ytimg.com/vi/${p.youtubeId}/hqdefault.jpg"
+                                alt="YouTube thumbnail"
+                                onerror="this.src='https://i.ytimg.com/vi/${p.youtubeId}/mqdefault.jpg'"
+                            >
+
+                        </div>
+                    </div>
+                    <div class="card-info-panel"><div class="card-info-inner"><div class="flex flex-col gap-4">
+                        <div class="flex justify-between items-center px-1">
+                            <label class="field-label">Memo</label>
+                            <a href="${p.url}" target="_blank" class="text-[10px] flex items-center gap-1 font-bold" style="color:#f87171" onmouseover="this.style.color='#fca5a5'" onmouseout="this.style.color='#f87171'">
+                                YouTubeで見る ${ICONS.external}
+                            </a>
+                        </div>
+                        <textarea placeholder="メモ..." class="memo-textarea" onfocus="window.appState.isEditing = true" onblur="window.appState.isEditing = false; updatePostField('${p.id}','memo',this.value)">${p.memo || ""}</textarea>
+                        <div><label class="field-label">Tags</label>
+                            <div id="tags-display-${p.id}" class="flex flex-wrap gap-1.5 mb-2.5"></div>
+                            <div id="tags-suggested-${p.id}" class="flex flex-wrap gap-1.5 mb-3"></div>
+                            <div class="tag-input-wrap"><span style="color:var(--text-muted)">${ICONS.tag}</span><input type="text" placeholder="Enterでタグ追加..." class="tag-text-input" onfocus="window.appState.isEditing = true" onblur="window.appState.isEditing = false" onkeydown="if(event.key === 'Enter' && !event.isComposing) { event.preventDefault(); addTag('${p.id}', this.value); this.value=''; }"></div>
+                        </div>
+                    </div></div></div>`;
+            } else {
+                // ── Tweetカード ──
+                card.innerHTML = `
+                    <div class="relative w-full min-h-[100px] tweet-wrapper overflow-hidden">
+                        <div class="drop-shield"></div>
+                        <div class="absolute top-3 right-3 z-50 opacity-0 group-hover:opacity-100 transition-all scale-90 group-hover:scale-100">
+                            <button onclick="removePost('${p.id}')" class="card-delete-btn flex items-center justify-center">${ICONS.trash}</button>
+                        </div>
+                        <div class="p-1" id="tweet-${p.id}"><div class="skeleton-placeholder m-2"></div></div>
+                    </div>
+                    <div class="card-info-panel"><div class="card-info-inner"><div class="flex flex-col gap-4">
+                        <div class="flex justify-between items-center px-1">
+                            <label class="field-label">Memo</label>
+                            <a href="https://x.com/i/status/${p.tweetId}" target="_blank" class="text-[10px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-bold">
+                                Xで見る ${ICONS.external}
+                            </a>
+                        </div>
+                        <textarea placeholder="メモ..." class="memo-textarea" onfocus="window.appState.isEditing = true" onblur="window.appState.isEditing = false; updatePostField('${p.id}','memo',this.value)">${p.memo || ""}</textarea>
+                        <div><label class="field-label">Tags</label>
+                            <div id="tags-display-${p.id}" class="flex flex-wrap gap-1.5 mb-2.5"></div>
+                            <div id="tags-suggested-${p.id}" class="flex flex-wrap gap-1.5 mb-3"></div>
+                            <div class="tag-input-wrap"><span style="color:var(--text-muted)">${ICONS.tag}</span><input type="text" placeholder="Enterでタグ追加..." class="tag-text-input" onfocus="window.appState.isEditing = true" onblur="window.appState.isEditing = false" onkeydown="if(event.key === 'Enter' && !event.isComposing) { event.preventDefault(); addTag('${p.id}', this.value); this.value=''; }"></div>
+                        </div>
+                    </div></div></div>`;
+            }
+            return card;
+        }
+
+        function autoResizeTextarea(el) {
+            el.style.height = 'auto';
+            el.style.height = el.scrollHeight + 'px';
+        }
+
+        function getColumnCount() {
+            const w = document.getElementById('gallery').offsetWidth;
+            if (w >= 1500) return 4;
+            if (w >= 1150) return 3;
+            if (w >= 680)  return 2;
+            return 1;
+        }
+
+        function renderActiveBoard() {
+            const board = window.appState.appData.boards.find(b => String(b.id) === String(window.appState.appData.activeBoardId));
+            const container = document.getElementById('gallery'); if (!container) return; if (!board) { document.getElementById('activeBoardTitle').textContent = "ボードを選択してください"; container.innerHTML = ''; return; }
+            document.getElementById('activeBoardTitle').textContent = board.name;
+            let posts = board.posts;
+            if (window.appState.searchQuery) posts = posts.filter(p =>
+                (p.memo||"").toLowerCase().includes(window.appState.searchQuery) ||
+                (p.title||"").toLowerCase().includes(window.appState.searchQuery) ||
+                (p.body||"").toLowerCase().includes(window.appState.searchQuery)
+            );
+            if (window.appState.selectedTags.length) posts = posts.filter(p => window.appState.selectedTags.every(t => (p.tags||[]).includes(t)));
+            if (window.appState.isFilterExpanded) updateFilterTagsUI();
+
+            // カードIDリストが変わった時だけ再描画
+            const allCardIds = Array.from(container.querySelectorAll('.bookmark-card')).map(c => c.getAttribute('data-id'));
+            const newIds = posts.map(p => p.id);
+            if (JSON.stringify(allCardIds) !== JSON.stringify(newIds)) {
+                container.innerHTML = '';
+                if (!posts.length) {
+                    document.getElementById('emptyState').classList.remove('hidden');
+                    return;
+                }
+                document.getElementById('emptyState').classList.add('hidden');
+
+                const colCount = getColumnCount();
+                const cols = Array.from({ length: colCount }, () => {
+                    const col = document.createElement('div');
+                    col.className = 'board-col';
+                    container.appendChild(col);
+                    return col;
+                });
+
+                posts.forEach((p, i) => {
+                    const card = buildCard(p);
+                    cols[i % colCount].appendChild(card);
+                    renderTags(p.id, p.tags);
+                    updateSuggestedTags(p.id);
+                    if (p.type === 'note') {
+                        setTimeout(() => {
+                            const t = document.getElementById('note-title-' + p.id);
+                            const b = document.getElementById('note-body-' + p.id);
+                            if (t) autoResizeTextarea(t);
+                            if (b) autoResizeTextarea(b);
+                        }, 0);
+                    } else if (p.type === 'tweet') {
+                        const tc = document.getElementById('tweet-' + p.id);
+                        const check = setInterval(() => { if (window.twttr && window.twttr.widgets) { clearInterval(check); window.twttr.widgets.createTweet(p.tweetId, tc, { theme: 'dark', lang: 'ja', dnt: true, conversation: 'none', cards: 'visible', width: 'auto' }).then(() => { const s = tc.querySelector('.skeleton-placeholder'); if (s) s.remove(); }); } }, 100); setTimeout(() => clearInterval(check), 8000);
+                    }
+                });
+            }
+        }
+
+        // ウィンドウリサイズ時に列数が変わったら再描画
+        let _lastColCount = 0;
+        window.addEventListener('resize', () => {
+            const gallery = document.getElementById('gallery');
+            if (!gallery) return;
+            const newCount = getColumnCount();
+            if (newCount !== _lastColCount) {
+                _lastColCount = newCount;
+                // 強制再描画: IDリストキャッシュをクリアして renderActiveBoard を呼ぶ
+                gallery.innerHTML = '';
+                renderActiveBoard();
+            }
+        });
+
+        window.exportData = () => { const d = JSON.stringify(window.appState.appData, null, 2); const u = 'data:application/json;charset=utf-8,'+ encodeURIComponent(d); const l = document.createElement('a'); l.setAttribute('href', u); l.setAttribute('download', 'backup.json'); l.click(); showToast('出力完了'); };
+        window.importData = () => document.getElementById('importFile').click();
+        
+        document.getElementById('importFile').addEventListener('change', e => {
+            const f = e.target.files[0]; if (!f) return;
+            const r = new FileReader();
+            r.onload = async ev => {
+                try {
+                    const d = JSON.parse(ev.target.result);
+                    const data = JSON.parse(JSON.stringify(window.appState.appData));
+                    if (d.type === 'single_board') {
+                        const fileName = f.name.replace(/\.[^/.]+$/, "");
+                        const newBoard = { ...d.data, id: Date.now().toString(), folderId: null, name: fileName };
+                        data.boards.push(newBoard);
+                        data.activeBoardId = newBoard.id;
+                        await window.saveData(data);
+                        showToast('ボードを取り込みました');
+                    } else if (d.boards) {
+                        await window.saveData(d);
+                        showToast('データを復元しました');
+                    } else { showToast('無効な形式'); }
+                } catch (err) { showToast('エラーが発生しました'); }
+            };
+            r.readAsText(f);
+        });
+
+        window.toggleSidebar = toggleSidebar; window.toggleSearch = toggleSearch; window.toggleFilter = toggleFilter; window.openNewBoardModal = openNewBoardModal; window.openNewFolderModal = openNewFolderModal; window.closeModal = closeModal; window.confirmCreateBoard = confirmCreateBoard; window.confirmCreateFolder = confirmCreateFolder; window.deleteBoard = deleteBoard; window.deleteFolder = deleteFolder; window.addPost = addPost; window.removePost = removePost; window.updatePostField = updatePostField; window.handleSearch = handleSearch; window.selectTagFilter = selectTagFilter; window.handleSearchMouseLeave = handleSearchMouseLeave; window.addTag = addTag; window.removeTag = removeTag; window.openHelpModal = openHelpModal; window.openRenameModal = openRenameModal; window.selectBoard = selectBoard; window.toggleFolder = toggleFolder; window.openExportBoardModal = openExportBoardModal; window.confirmExportBoard = confirmExportBoard; window.addNoteCard = addNoteCard; window.autoResizeTextarea = autoResizeTextarea; window.clearTagFilters = clearTagFilters;
+
+        document.getElementById('urlInput').addEventListener('keypress', (e) => e.key === 'Enter' && addPost());
+        document.getElementById('newBoardName').addEventListener('keypress', (e) => e.key === 'Enter' && confirmCreateBoard());
+        document.getElementById('newFolderName').addEventListener('keypress', (e) => e.key === 'Enter' && confirmCreateFolder());
+    </script>
+</body>
+</html>
