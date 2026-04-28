@@ -13,7 +13,8 @@
             chevronDown: `<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M19 9l-7 7-7-7" /></svg>`,
             chevronRight: `<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M9 5l7 7-7 7" /></svg>`,
             tag: `<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" /></svg>`,
-            external: `<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>`
+            external: `<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>`,
+            maximize: `<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.4"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3M3 16v3a2 2 0 002 2h3m8 0h3a2 2 0 002-2v-3" /></svg>`
         };
 
         function getTagStyle(tagName) {
@@ -277,9 +278,29 @@
                     class="youtube-embed"
                     src="https://www.youtube.com/embed/${encodeURIComponent(youtubeId)}?autoplay=1&rel=0"
                     title="YouTube video player"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                    allowfullscreen
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+                    allowfullscreen="true"
+                    webkitallowfullscreen="true"
+                    mozallowfullscreen="true"
                 ></iframe>`;
+        }
+
+        function requestElementFullscreen(el) {
+            const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+            if (!fn) return Promise.reject(new Error('Fullscreen is not supported'));
+            return fn.call(el);
+        }
+
+        function openYouTubeFullscreen(postId, youtubeId, e) {
+            if (e) e.stopPropagation();
+            playYouTube(postId, youtubeId);
+
+            const media = document.getElementById(`youtube-media-${postId}`);
+            if (!media) return;
+
+            Promise.resolve(requestElementFullscreen(media)).catch(() => {
+                showToast("このブラウザでは全画面表示を開始できませんでした");
+            });
         }
 
         async function addPost() {
@@ -293,14 +314,14 @@
 
             const youtubeId = parseYouTubeId(url);
             if (youtubeId) {
-                board.posts.unshift({ type: 'youtube', url, id: Date.now().toString() + Math.random().toString(36).substr(2, 5), youtubeId, memo: "", tags: [] });
+                board.posts.unshift({ type: 'youtube', url, id: Date.now().toString() + Math.random().toString(36).substr(2, 5), youtubeId, memo: "", tags: ["youtube"] });
                 await window.saveData(data); input.value = ''; showToast("追加しました");
                 return;
             }
 
             const tweetId = (url.match(/\/status\/(\d+)/) || [])[1];
             if (!tweetId) return showToast("URLが無効（X または YouTube のURLを入力してください）");
-            board.posts.unshift({ type: 'tweet', url, id: Date.now().toString() + Math.random().toString(36).substr(2, 5), tweetId, memo: "", tags: [] });
+            board.posts.unshift({ type: 'tweet', url, id: Date.now().toString() + Math.random().toString(36).substr(2, 5), tweetId, memo: "", tags: ["x"] });
             await window.saveData(data); input.value = ''; showToast("追加しました");
         }
 
@@ -383,6 +404,7 @@
             const postIdArg = escapeHtml(jsString(p.id));
             const postIdHtml = escapeHtml(p.id);
             const youtubeIdHtml = escapeHtml(p.youtubeId || '');
+            const youtubeIdArg = escapeHtml(jsString(p.youtubeId || ''));
             const tweetIdHtml = escapeHtml(p.tweetId || '');
             const card = document.createElement('div');
             card.className = 'bookmark-card group shadow-lg cursor-grab active:cursor-grabbing';
@@ -434,11 +456,12 @@
                 // ── YouTubeカード ──
                 card.innerHTML = `
                     <div id="youtube-media-${postIdHtml}" class="relative w-full youtube-wrapper overflow-hidden">
-                        <div class="drop-shield" onclick="playYouTube(${postIdArg}, '${youtubeIdHtml}')"></div>
-                        <div class="absolute top-3 right-3 z-50 opacity-0 group-hover:opacity-100 transition-all scale-90 group-hover:scale-100">
+                        <div class="drop-shield" onclick="playYouTube(${postIdArg}, ${youtubeIdArg})"></div>
+                        <div class="media-actions">
+                            <button type="button" onclick="openYouTubeFullscreen(${postIdArg}, ${youtubeIdArg}, event)" class="media-action-btn" aria-label="全画面で再生">${ICONS.maximize}</button>
                             <button onclick="removePost(${postIdArg})" class="card-delete-btn flex items-center justify-center" aria-label="カードを削除">${ICONS.trash}</button>
                         </div>
-                        <button type="button" class="youtube-thumb-wrap block" onclick="playYouTube(${postIdArg}, '${youtubeIdHtml}')" aria-label="埋め込みでYouTubeを再生">
+                        <button type="button" class="youtube-thumb-wrap block" onclick="playYouTube(${postIdArg}, ${youtubeIdArg})" aria-label="埋め込みでYouTubeを再生">
                             <img
                                 src="https://i.ytimg.com/vi/${youtubeIdHtml}/hqdefault.jpg"
                                 alt="YouTube thumbnail"
@@ -559,16 +582,19 @@
 
         // ウィンドウリサイズ時に列数が変わったら再描画
         let _lastColCount = 0;
+        let _resizeTimer = null;
         window.addEventListener('resize', () => {
-            const gallery = document.getElementById('gallery');
-            if (!gallery) return;
-            const newCount = getColumnCount();
-            if (newCount !== _lastColCount) {
-                _lastColCount = newCount;
-                // 強制再描画: IDリストキャッシュをクリアして renderActiveBoard を呼ぶ
-                gallery.innerHTML = '';
-                renderActiveBoard();
-            }
+            clearTimeout(_resizeTimer);
+            _resizeTimer = setTimeout(() => {
+                const gallery = document.getElementById('gallery');
+                if (!gallery) return;
+                const newCount = getColumnCount();
+                if (newCount !== _lastColCount) {
+                    _lastColCount = newCount;
+                    gallery.innerHTML = '';
+                    renderActiveBoard();
+                }
+            }, 120);
         });
 
         window.exportData = () => { const d = JSON.stringify(window.appState.appData, null, 2); const u = 'data:application/json;charset=utf-8,'+ encodeURIComponent(d); const l = document.createElement('a'); l.setAttribute('href', u); l.setAttribute('download', 'backup.json'); l.click(); showToast('出力完了'); };
@@ -589,7 +615,7 @@
                         await window.saveData(data);
                         showToast('ボードを取り込みました');
                     } else if (d.boards) {
-                        await window.saveData(d);
+                        await window.saveData(window.normalizeAppData ? window.normalizeAppData(d) : d);
                         showToast('データを復元しました');
                     } else { showToast('無効な形式'); }
                 } catch (err) { showToast('エラーが発生しました'); }
@@ -599,7 +625,8 @@
 
         window.toggleSidebar = toggleSidebar; window.toggleSearch = toggleSearch; window.toggleFilter = toggleFilter; window.openNewBoardModal = openNewBoardModal; window.openNewFolderModal = openNewFolderModal; window.closeModal = closeModal; window.confirmCreateBoard = confirmCreateBoard; window.confirmCreateFolder = confirmCreateFolder; window.deleteBoard = deleteBoard; window.deleteFolder = deleteFolder; window.addPost = addPost; window.removePost = removePost; window.updatePostField = updatePostField; window.handleSearch = handleSearch; window.selectTagFilter = selectTagFilter; window.handleSearchMouseLeave = handleSearchMouseLeave; window.addTag = addTag; window.removeTag = removeTag; window.openHelpModal = openHelpModal; window.openRenameModal = openRenameModal; window.selectBoard = selectBoard; window.toggleFolder = toggleFolder; window.openExportBoardModal = openExportBoardModal; window.confirmExportBoard = confirmExportBoard; window.addNoteCard = addNoteCard; window.autoResizeTextarea = autoResizeTextarea; window.clearTagFilters = clearTagFilters;
         window.playYouTube = playYouTube;
+        window.openYouTubeFullscreen = openYouTubeFullscreen;
 
-        document.getElementById('urlInput').addEventListener('keypress', (e) => e.key === 'Enter' && addPost());
-        document.getElementById('newBoardName').addEventListener('keypress', (e) => e.key === 'Enter' && confirmCreateBoard());
-        document.getElementById('newFolderName').addEventListener('keypress', (e) => e.key === 'Enter' && confirmCreateFolder());
+        document.getElementById('urlInput').addEventListener('keydown', (e) => e.key === 'Enter' && addPost());
+        document.getElementById('newBoardName').addEventListener('keydown', (e) => e.key === 'Enter' && confirmCreateBoard());
+        document.getElementById('newFolderName').addEventListener('keydown', (e) => e.key === 'Enter' && confirmCreateFolder());

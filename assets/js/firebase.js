@@ -3,6 +3,25 @@
         import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         const isCloudEnv = typeof __firebase_config !== 'undefined';
+
+        const ensureTypeTags = (data) => {
+            if (!data || !Array.isArray(data.boards)) return data;
+            if (!Array.isArray(data.folders)) data.folders = [];
+
+            data.boards.forEach((board) => {
+                if (!Array.isArray(board.posts)) board.posts = [];
+                board.posts.forEach((post) => {
+                    if (!Array.isArray(post.tags)) post.tags = [];
+                    const type = post.type || (post.youtubeId ? 'youtube' : 'tweet');
+                    const autoTag = type === 'youtube' ? 'youtube' : type === 'tweet' ? 'x' : null;
+                    if (autoTag && !post.tags.includes(autoTag)) post.tags.unshift(autoTag);
+                });
+            });
+
+            return data;
+        };
+
+        window.normalizeAppData = ensureTypeTags;
         
         window.appState = {
             user: null,
@@ -25,6 +44,7 @@
         };
 
         window.saveData = async (newData, silent = false) => {
+            newData = ensureTypeTags(newData);
             window.appState.appData = newData;
             if (window.appState.isCloud && window.appState.user) {
                 const uid = window.appState.user.uid;
@@ -63,8 +83,7 @@
                         onSnapshot(docRef, (docSnap) => {
                             if (docSnap.exists()) {
                                 const data = docSnap.data();
-                                if (!data.folders) data.folders = [];
-                                window.appState.appData = data;
+                                window.appState.appData = ensureTypeTags(data);
                                 if (!window.appState.isEditing) {
                                     renderSidebar();
                                     renderActiveBoard();
@@ -85,8 +104,7 @@
                 if (saved) {
                     try {
                         const data = JSON.parse(saved);
-                        if (!data.folders) data.folders = [];
-                        window.appState.appData = data;
+                        window.appState.appData = ensureTypeTags(data);
                     } catch (e) {
                         console.error("Failed to parse saved data", e);
                         localStorage.removeItem('x_board_local_data_v4');
